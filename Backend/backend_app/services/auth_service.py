@@ -40,7 +40,7 @@ def register_user(username: str, password: str, phone: str | None, nickname: str
             raise AppError("USERNAME_ALREADY_EXISTS", "用户名已存在", 409)
 
         safe_nickname = nickname or username
-        cursor = conn.execute(
+        user_id = conn.execute_insert(
             """
             INSERT INTO users (
                 username, password_hash, phone, nickname, avatar_url, balance, status
@@ -48,7 +48,6 @@ def register_user(username: str, password: str, phone: str | None, nickname: str
             """,
             (username, hash_password(password), phone, safe_nickname),
         )
-        user_id = cursor.lastrowid
         user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         token = _create_session(conn, user_id)
         return {

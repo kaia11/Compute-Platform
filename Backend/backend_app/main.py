@@ -6,21 +6,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .api.routes import api_router
-from .config import API_PREFIX, APP_TITLE, APP_VERSION
+from .config import API_PREFIX, APP_TITLE, APP_VERSION, resolve_cors_origins, resolve_database_url
 from .db import configure_database, init_db
 from .errors import AppError, error_response, from_http_exception
 
 
 def create_app(database_path: str | None = None) -> FastAPI:
-    configure_database(database_path)
+    configure_database(db_path=database_path, database_url=None if database_path else resolve_database_url())
     init_db()
     application = FastAPI(title=APP_TITLE, version=APP_VERSION)
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-        ],
+        allow_origins=resolve_cors_origins(),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

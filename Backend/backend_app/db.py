@@ -1,38 +1,113 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
-from .config import resolve_db_path
+from psycopg import connect
+from psycopg.rows import dict_row
+
+from .config import resolve_database_url, resolve_db_path
 from .seed import CARD_PRODUCTS, DEFAULT_HISTORY_RENTALS, DEFAULT_USERS, USER_PRICE_CONFIGS, build_cabinets
 
 
 _db_path: Path = resolve_db_path()
+_database_url: str | None = resolve_database_url()
 
 
 def dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
     return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
 
 
-def configure_database(db_path: str | Path | None = None) -> None:
-    global _db_path
+class CursorAdapter:
+    def __init__(self, cursor: Any):
+        self._cursor = cursor
+
+    @property
+    def lastrowid(self) -> int | None:
+        return getattr(self._cursor, "lastrowid", None)
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+
+class ConnectionAdapter:
+    def __init__(self, conn: Any, backend: str):
+        self._conn = conn
+        self.backend = backend
+
+    def execute(self, sql: str, params: Any = None) -> CursorAdapter:
+        query, adapted_params = _adapt_query(sql, params, self.backend)
+        if adapted_params is None:
+            cursor = self._conn.execute(query)
+        else:
+            cursor = self._conn.execute(query, adapted_params)
+        return CursorAdapter(cursor)
+
+    def executemany(self, sql: str, seq_of_params: list[Any]) -> CursorAdapter:
+        sample = seq_of_params[0] if seq_of_params else None
+        query, _ = _adapt_query(sql, sample, self.backend)
+        adapted = [_adapt_params(item, self.backend) for item in seq_of_params]
+        cursor = self._conn.executemany(query, adapted)
+        return CursorAdapter(cursor)
+
+    def execute_insert(self, sql: str, params: Any) -> int:
+        if self.backend == "postgres":
+            cursor = self.execute(_with_returning_id(sql), params)
+            row = cursor.fetchone()
+            if not row:
+                raise RuntimeError("Insert did not return an id")
+            return int(row["id"])
+        cursor = self.execute(sql, params)
+        if cursor.lastrowid is None:
+            raise RuntimeError("Insert did not produce a lastrowid")
+        return int(cursor.lastrowid)
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+def configure_database(db_path: str | Path | None = None, database_url: str | None = None) -> None:
+    global _db_path, _database_url
     _db_path = Path(db_path) if db_path else resolve_db_path()
+    _database_url = database_url if database_url is not None else resolve_database_url()
 
 
 def get_database_path() -> Path:
     return _db_path
 
 
-def get_connection() -> sqlite3.Connection:
+def get_database_url() -> str | None:
+    return _database_url
+
+
+def get_connection() -> ConnectionAdapter:
+    if _database_url:
+        conn = connect(_database_url, row_factory=dict_row)
+        return ConnectionAdapter(conn, "postgres")
+
     conn = sqlite3.connect(get_database_path(), detect_types=sqlite3.PARSE_DECLTYPES)
     conn.row_factory = dict_factory
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    return ConnectionAdapter(conn, "sqlite")
 
 
 @contextmanager
-def connection_scope() -> sqlite3.Connection:
+def connection_scope() -> ConnectionAdapter:
     conn = get_connection()
     try:
         yield conn
@@ -41,10 +116,11 @@ def connection_scope() -> sqlite3.Connection:
 
 
 @contextmanager
-def transaction() -> sqlite3.Connection:
+def transaction() -> ConnectionAdapter:
     conn = get_connection()
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        if conn.backend == "sqlite":
+            conn.execute("BEGIN IMMEDIATE")
         yield conn
         conn.commit()
     except Exception:
@@ -56,129 +132,154 @@ def transaction() -> sqlite3.Connection:
 
 def init_db() -> None:
     with connection_scope() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS card_products (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                card_type TEXT NOT NULL UNIQUE,
-                title TEXT NOT NULL,
-                cabinet_desc TEXT NOT NULL,
-                vram TEXT NOT NULL,
-                cpu TEXT NOT NULL,
-                memory TEXT NOT NULL,
-                display_price TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS user_price_configs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                card_type TEXT NOT NULL,
-                cabinet_type TEXT NOT NULL,
-                hourly_user_price REAL NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(card_type, cabinet_type)
-            );
-
-            CREATE TABLE IF NOT EXISTS cabinets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                cabinet_code TEXT NOT NULL UNIQUE,
-                location TEXT NOT NULL,
-                card_type TEXT NOT NULL,
-                cabinet_type TEXT NOT NULL,
-                capacity_cards INTEGER NOT NULL,
-                day_hourly_power_cost REAL NOT NULL,
-                night_hourly_power_cost REAL NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('available', 'rented', 'offline'))
-            );
-
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                phone TEXT,
-                nickname TEXT NOT NULL,
-                avatar_url TEXT,
-                balance REAL NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS user_balance_transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                type TEXT NOT NULL,
-                amount REAL NOT NULL,
-                balance_after REAL NOT NULL,
-                reference_type TEXT,
-                reference_id INTEGER,
-                remark TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS user_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                token TEXT NOT NULL UNIQUE,
-                status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'revoked')),
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                last_used_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS rentals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                card_type TEXT NOT NULL,
-                cabinet_type TEXT NOT NULL,
-                cabinet_count INTEGER NOT NULL,
-                timeslot TEXT NOT NULL CHECK(timeslot IN ('day', 'night')),
-                started_at TEXT NOT NULL,
-                ended_at TEXT,
-                duration_seconds INTEGER,
-                hourly_user_price_total REAL NOT NULL,
-                hourly_power_cost_total REAL NOT NULL,
-                user_total_amount REAL,
-                power_cost_total REAL,
-                status TEXT NOT NULL CHECK(status IN ('active', 'cancelled')),
-                ip TEXT NOT NULL,
-                password TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS rental_allocations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rental_id INTEGER NOT NULL,
-                cabinet_id INTEGER NOT NULL,
-                hourly_user_price REAL NOT NULL,
-                hourly_power_cost REAL NOT NULL,
-                FOREIGN KEY(rental_id) REFERENCES rentals(id) ON DELETE CASCADE,
-                FOREIGN KEY(cabinet_id) REFERENCES cabinets(id) ON DELETE CASCADE
-            );
-            """
-        )
+        for statement in _schema_statements(conn.backend):
+            conn.execute(statement)
         _migrate_schema(conn)
         _seed_if_empty(conn)
         conn.commit()
 
 
-def _migrate_schema(conn: sqlite3.Connection) -> None:
+def _schema_statements(backend: str) -> list[str]:
+    identity = "INTEGER PRIMARY KEY AUTOINCREMENT" if backend == "sqlite" else "INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY"
+    return [
+        f"""
+        CREATE TABLE IF NOT EXISTS card_products (
+            id {identity},
+            card_type TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            cabinet_desc TEXT NOT NULL,
+            vram TEXT NOT NULL,
+            cpu TEXT NOT NULL,
+            memory TEXT NOT NULL,
+            display_price TEXT NOT NULL
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS user_price_configs (
+            id {identity},
+            card_type TEXT NOT NULL,
+            cabinet_type TEXT NOT NULL,
+            hourly_user_price REAL NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(card_type, cabinet_type)
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS cabinets (
+            id {identity},
+            cabinet_code TEXT NOT NULL UNIQUE,
+            location TEXT NOT NULL,
+            card_type TEXT NOT NULL,
+            cabinet_type TEXT NOT NULL,
+            capacity_cards INTEGER NOT NULL,
+            day_hourly_power_cost REAL NOT NULL,
+            night_hourly_power_cost REAL NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('available', 'rented', 'offline'))
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS users (
+            id {identity},
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            phone TEXT,
+            nickname TEXT NOT NULL,
+            avatar_url TEXT,
+            balance REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS user_balance_transactions (
+            id {identity},
+            user_id INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            amount REAL NOT NULL,
+            balance_after REAL NOT NULL,
+            reference_type TEXT,
+            reference_id INTEGER,
+            remark TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            id {identity},
+            user_id INTEGER NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'revoked')),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_used_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS rentals (
+            id {identity},
+            user_id INTEGER,
+            card_type TEXT NOT NULL,
+            cabinet_type TEXT NOT NULL,
+            cabinet_count INTEGER NOT NULL,
+            timeslot TEXT NOT NULL CHECK(timeslot IN ('day', 'night')),
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            duration_seconds INTEGER,
+            hourly_user_price_total REAL NOT NULL,
+            hourly_power_cost_total REAL NOT NULL,
+            user_total_amount REAL,
+            power_cost_total REAL,
+            status TEXT NOT NULL CHECK(status IN ('active', 'cancelled')),
+            ip TEXT NOT NULL,
+            password TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS rental_allocations (
+            id {identity},
+            rental_id INTEGER NOT NULL,
+            cabinet_id INTEGER NOT NULL,
+            hourly_user_price REAL NOT NULL,
+            hourly_power_cost REAL NOT NULL,
+            FOREIGN KEY(rental_id) REFERENCES rentals(id) ON DELETE CASCADE,
+            FOREIGN KEY(cabinet_id) REFERENCES cabinets(id) ON DELETE CASCADE
+        )
+        """,
+    ]
+
+
+def _migrate_schema(conn: ConnectionAdapter) -> None:
     _ensure_column(conn, "rentals", "user_id", "INTEGER")
 
 
-def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
-    columns = {
-        row["name"]
-        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-    }
+def _ensure_column(conn: ConnectionAdapter, table_name: str, column_name: str, column_sql: str) -> None:
+    if conn.backend == "sqlite":
+        columns = {
+            row["name"]
+            for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+    else:
+        rows = conn.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+            """,
+            (table_name,),
+        ).fetchall()
+        columns = {row["column_name"] for row in rows}
+
     if column_name in columns:
         return
     conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
 
-def _seed_if_empty(conn: sqlite3.Connection) -> None:
+def _seed_if_empty(conn: ConnectionAdapter) -> None:
     table_records = {
         "card_products": CARD_PRODUCTS,
         "user_price_configs": USER_PRICE_CONFIGS,
@@ -227,11 +328,11 @@ def _seed_if_empty(conn: sqlite3.Connection) -> None:
     _seed_history_rentals(conn)
 
 
-def _table_count(conn: sqlite3.Connection, table_name: str) -> int:
+def _table_count(conn: ConnectionAdapter, table_name: str) -> int:
     return int(conn.execute(f"SELECT COUNT(*) AS count FROM {table_name}").fetchone()["count"])
 
 
-def _seed_users(conn: sqlite3.Connection) -> None:
+def _seed_users(conn: ConnectionAdapter) -> None:
     if _table_count(conn, "users"):
         return
 
@@ -263,12 +364,12 @@ def _seed_users(conn: sqlite3.Connection) -> None:
             default_user["id"],
             float(default_user["balance"]),
             float(default_user["balance"]),
-            "初始化演示余额",
+            "初始化充值",
         ),
     )
 
 
-def _seed_history_rentals(conn: sqlite3.Connection) -> None:
+def _seed_history_rentals(conn: ConnectionAdapter) -> None:
     default_user = conn.execute(
         "SELECT id FROM users WHERE username = ?",
         (DEFAULT_USERS[0]["username"],),
@@ -283,6 +384,13 @@ def _seed_history_rentals(conn: sqlite3.Connection) -> None:
     if existing:
         return
 
+    rows = [
+        {
+            **record,
+            "user_id": default_user["id"],
+        }
+        for record in DEFAULT_HISTORY_RENTALS
+    ]
     conn.executemany(
         """
         INSERT INTO rentals (
@@ -301,26 +409,45 @@ def _seed_history_rentals(conn: sqlite3.Connection) -> None:
             status,
             ip,
             password
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (
+            :user_id,
+            :card_type,
+            :cabinet_type,
+            :cabinet_count,
+            :timeslot,
+            :started_at,
+            :ended_at,
+            :duration_seconds,
+            :hourly_user_price_total,
+            :hourly_power_cost_total,
+            :user_total_amount,
+            :power_cost_total,
+            :status,
+            :ip,
+            :password
+        )
         """,
-        [
-            (
-                default_user["id"],
-                item["card_type"],
-                item["cabinet_type"],
-                item["cabinet_count"],
-                item["timeslot"],
-                item["started_at"],
-                item["ended_at"],
-                item["duration_seconds"],
-                item["hourly_user_price_total"],
-                item["hourly_power_cost_total"],
-                item["user_total_amount"],
-                item["power_cost_total"],
-                item["status"],
-                item["ip"],
-                item["password"],
-            )
-            for item in DEFAULT_HISTORY_RENTALS
-        ],
+        rows,
     )
+
+
+def _adapt_query(sql: str, params: Any, backend: str) -> tuple[str, Any]:
+    if backend == "sqlite":
+        return sql, params
+    query = sql.replace("?", "%s")
+    if isinstance(params, dict):
+        query = re.sub(r":([A-Za-z_][A-Za-z0-9_]*)", r"%(\1)s", query)
+    return query, _adapt_params(params, backend)
+
+
+def _adapt_params(params: Any, backend: str) -> Any:
+    if backend == "sqlite" or params is None:
+        return params
+    if isinstance(params, list):
+        return tuple(params)
+    return params
+
+
+def _with_returning_id(sql: str) -> str:
+    stripped = sql.rstrip().rstrip(";")
+    return f"{stripped} RETURNING id"

@@ -120,7 +120,7 @@ def create_rental(
         hourly_power_cost_total = sum(float(row[cost_column]) for row in selected)
         hourly_user_price_total = hourly_user_price * cabinet_count
 
-        cursor = conn.execute(
+        rental_id = conn.execute_insert(
             """
             INSERT INTO rentals (
                 user_id, card_type, cabinet_type, cabinet_count, timeslot,
@@ -143,7 +143,6 @@ def create_rental(
                 FIXED_CONNECTION["password"],
             ),
         )
-        rental_id = cursor.lastrowid
 
         for row in selected:
             conn.execute(

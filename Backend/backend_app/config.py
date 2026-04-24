@@ -17,6 +17,20 @@ TIMEZONE = ZoneInfo("Asia/Shanghai")
 FIXED_CONNECTION = {"ip": "192.168.0.100", "password": "123456"}
 
 
+def resolve_database_url() -> str | None:
+    return os.getenv("DATABASE_URL") or None
+
+
 def resolve_db_path() -> Path:
     raw = os.getenv("COMPUTE_RENTAL_DB_PATH")
     return Path(raw) if raw else DEFAULT_DB_PATH
+
+
+def resolve_cors_origins() -> list[str]:
+    raw = os.getenv("CORS_ALLOWED_ORIGINS", "")
+    defaults = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    extras = [item.strip() for item in raw.split(",") if item.strip()]
+    return list(dict.fromkeys(defaults + extras))
