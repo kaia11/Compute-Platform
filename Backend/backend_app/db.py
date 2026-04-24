@@ -56,6 +56,10 @@ class ConnectionAdapter:
         sample = seq_of_params[0] if seq_of_params else None
         query, _ = _adapt_query(sql, sample, self.backend)
         adapted = [_adapt_params(item, self.backend) for item in seq_of_params]
+        if self.backend == "postgres":
+            with self._conn.cursor(row_factory=dict_row) as cursor:
+                cursor.executemany(query, adapted)
+                return CursorAdapter(cursor)
         cursor = self._conn.executemany(query, adapted)
         return CursorAdapter(cursor)
 
