@@ -24,6 +24,26 @@ Copy `Backend/.env.example` into a local `.env` file if you want a template.
 - `COMPUTE_RENTAL_DB_PATH`: local SQLite path used when `DATABASE_URL` is empty
 - `CORS_ALLOWED_ORIGINS`: comma-separated frontend origins to allow in addition to local Vite URLs
 
+## Sync Seed Cabinets
+
+`seed.py` only fills the database when the `cabinets` table is empty. If seed cabinet
+data changes after deployment, run the sync script once against the target database.
+
+Preview the changes:
+
+```bash
+python scripts/sync_cabinets_from_seed.py
+```
+
+Apply the changes:
+
+```bash
+python scripts/sync_cabinets_from_seed.py --apply
+```
+
+Existing cabinet statuses are preserved by default. Add `--sync-status` only if you
+intentionally want existing cabinet statuses to match `seed.py`.
+
 ## API
 
 - `GET /api/locations/summary`
