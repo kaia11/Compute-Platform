@@ -124,7 +124,7 @@ TEMPLATES = [
     CabinetTemplate("位置2", "910B", "8卡机柜", 8, 4, 25.2, 21.6, "P2-910B"),
     CabinetTemplate("位置2", "910C", "16卡机柜", 16, 3, 29.2, 24.9, "P2-910C"),
     CabinetTemplate("位置3", "4090", "单卡机柜", 1, 6, 4.9, 4.2, "P3-4090-S"),
-    CabinetTemplate("位置3", "4090", "双卡机柜", 2, 2, 9.1, 8.4, "P3-4090-D"),
+    CabinetTemplate("位置3", "4090", "双卡机柜", 2, 7, 9.1, 8.4, "P3-4090-D"),
     CabinetTemplate("位置3", "910B", "8卡机柜", 8, 3, 24.6, 22.1, "P3-910B"),
     CabinetTemplate("位置3", "910C", "16卡机柜", 16, 4, 28.7, 25.4, "P3-910C"),
     CabinetTemplate("位置4", "4090", "单卡机柜", 1, 3, 5.7, 4.9, "P4-4090-S"),
@@ -133,21 +133,76 @@ TEMPLATES = [
     CabinetTemplate("位置4", "910C", "16卡机柜", 16, 5, 29.8, 25.2, "P4-910C"),
 ]
 
-LOCATION_STATUS_PLANS = {
-    "位置1": ["available"] * 7 + ["rented"] * 5 + ["offline"] * 2,
-    "位置2": ["rented"] * 11 + ["offline"] * 3,
-    "位置3": ["available"] * 5 + ["rented"] * 6 + ["offline"] * 4,
-    "位置4": ["offline"] * 14,
-}
+DEFAULT_CABINET_STATUS = "offline"
 
-STATUS_OVERRIDES = {
+CABINET_STATUS_MAP = {
+    "P1-4090-D-001": "available",
+    "P1-4090-D-002": "available",
+    "P1-4090-D-003": "available",
+    "P1-4090-S-001": "available",
+    "P1-4090-S-002": "rented",
+    "P1-4090-S-003": "rented",
+    "P1-4090-S-004": "offline",
+    "P1-910B-001": "available",
+    "P1-910B-002": "available",
+    "P1-910B-003": "rented",
+    "P1-910B-004": "rented",
+    "P1-910B-005": "rented",
+    "P1-910C-001": "offline",
     "P1-910C-002": "available",
+    "P2-4090-D-001": "rented",
+    "P2-4090-D-002": "rented",
+    "P2-4090-D-003": "rented",
+    "P2-4090-D-004": "offline",
+    "P2-4090-D-005": "offline",
+    "P2-4090-S-001": "rented",
+    "P2-4090-S-002": "rented",
+    "P2-910B-001": "rented",
+    "P2-910B-002": "rented",
+    "P2-910B-003": "offline",
+    "P2-910B-004": "offline",
+    "P2-910C-001": "rented",
+    "P2-910C-002": "rented",
+    "P2-910C-003": "offline",
+    "P3-4090-D-001": "available",
+    "P3-4090-D-002": "rented",
+    "P3-4090-D-003": "offline",
+    "P3-4090-D-004": "offline",
+    "P3-4090-D-005": "offline",
+    "P3-4090-D-006": "offline",
+    "P3-4090-D-007": "offline",
+    "P3-4090-S-001": "available",
+    "P3-4090-S-002": "available",
+    "P3-4090-S-003": "available",
+    "P3-4090-S-004": "rented",
+    "P3-4090-S-005": "rented",
+    "P3-4090-S-006": "offline",
+    "P3-910B-001": "available",
+    "P3-910B-002": "rented",
+    "P3-910B-003": "offline",
     "P3-910C-001": "available",
+    "P3-910C-002": "rented",
+    "P3-910C-003": "offline",
+    "P3-910C-004": "offline",
+    "P4-4090-D-001": "offline",
+    "P4-4090-D-002": "offline",
+    "P4-4090-D-003": "offline",
+    "P4-4090-D-004": "offline",
+    "P4-4090-S-001": "offline",
+    "P4-4090-S-002": "offline",
+    "P4-4090-S-003": "offline",
+    "P4-910B-001": "offline",
+    "P4-910B-002": "offline",
+    "P4-910C-001": "offline",
+    "P4-910C-002": "offline",
+    "P4-910C-003": "offline",
+    "P4-910C-004": "offline",
+    "P4-910C-005": "offline",
 }
 
 
 def build_cabinets() -> list[dict]:
-    grouped: dict[str, list[dict]] = {location: [] for location in LOCATION_STATUS_PLANS}
+    grouped: dict[str, list[dict]] = {template.location: [] for template in TEMPLATES}
 
     for template in TEMPLATES:
         for index in range(1, template.quantity + 1):
@@ -165,24 +220,8 @@ def build_cabinets() -> list[dict]:
 
     cabinets: list[dict] = []
     for location, items in grouped.items():
-        statuses = LOCATION_STATUS_PLANS[location]
-        if len(items) != len(statuses):
-            raise ValueError(f"status plan mismatch for {location}")
         items.sort(key=lambda item: item["cabinet_code"])
-        for item, status in zip(items, statuses, strict=True):
+        for item in items:
+            status = CABINET_STATUS_MAP.get(item["cabinet_code"], DEFAULT_CABINET_STATUS)
             cabinets.append({**item, "status": status})
-
-    cabinets_by_code = {cabinet["cabinet_code"]: cabinet for cabinet in cabinets}
-    for cabinet_code, forced_status in STATUS_OVERRIDES.items():
-        current = cabinets_by_code[cabinet_code]
-        if current["status"] == forced_status:
-            continue
-        swap_target = next(
-            cabinet
-            for cabinet in cabinets
-            if cabinet["location"] == current["location"]
-            and cabinet["status"] == forced_status
-            and cabinet["cabinet_code"] not in STATUS_OVERRIDES
-        )
-        swap_target["status"], current["status"] = current["status"], forced_status
     return cabinets
