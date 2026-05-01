@@ -13,6 +13,7 @@ export default function ResultPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [cancelling, setCancelling] = useState(false);
+  const [sshReady, setSshReady] = useState(false);
 
   useEffect(() => {
     if (!rentalId) {
@@ -41,6 +42,18 @@ export default function ResultPage() {
       active = false;
     };
   }, [rentalId]);
+
+  useEffect(() => {
+    if (!rental || rental.status === "cancelled") {
+      setSshReady(false);
+      return;
+    }
+    setSshReady(false);
+    const timer = window.setTimeout(() => {
+      setSshReady(true);
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [rental]);
 
   async function handleCancelRental() {
     if (!rentalId) {
@@ -83,30 +96,58 @@ export default function ResultPage() {
 
       {!loading && rental ? (
         <section className="result-layout">
-          <div className="panel result-primary">
-            <div className="panel-head">
+          <div className="panel result-primary result-shell">
+            <div className="result-instance-head">
               <div>
-                <h2>{rental.card_type} / {rental.cabinet_type}</h2>
-                <p>租用台数 {rental.cabinet_count}，当前状态 {rental.status}</p>
+                <span className="eyebrow">Instance</span>
+                <h2>{rental.card_label}</h2>
+                <p>
+                  {rental.allocations[0]?.location ?? "-"} · 创建于 {rental.started_at ?? "-"}
+                </p>
               </div>
-              <button
-                className="primary-action"
-                disabled={cancelling || rental.status === "cancelled"}
-                onClick={handleCancelRental}
-              >
-                {rental.status === "cancelled" ? "已取消" : cancelling ? "处理中..." : "取消租用"}
-              </button>
+              <div className="result-instance-actions">
+                <span className={`detail-status ${rental.status === "active" ? "node-available" : "node-offline"}`}>
+                  {rental.status === "active" ? "运行中" : "已取消"}
+                </span>
+                <button
+                  className="secondary-link"
+                  disabled={cancelling || rental.status === "cancelled"}
+                  onClick={handleCancelRental}
+                >
+                  {rental.status === "cancelled" ? "已取消" : cancelling ? "处理中..." : "关机"}
+                </button>
+              </div>
             </div>
 
-            <div className="result-stat-grid">
-              <div><span>开始时间</span><strong>{rental.started_at ?? "-"}</strong></div>
-              <div><span>结束时间</span><strong>{rental.ended_at ?? "-"}</strong></div>
-              <div><span>总时长</span><strong>{formatDuration(rental.duration_seconds)}</strong></div>
-              <div><span>时段</span><strong>{rental.timeslot}</strong></div>
-              <div><span>用户每小时总价</span><strong>{formatCurrency(rental.hourly_user_price_total)}</strong></div>
-              <div><span>电费每小时总成本</span><strong>{formatCurrency(rental.hourly_power_cost_total)}</strong></div>
-              <div><span>用户总金额</span><strong>{formatCurrency(rental.user_total_amount)}</strong></div>
-              <div><span>电费总成本</span><strong>{formatCurrency(rental.power_cost_total)}</strong></div>
+            <div className="result-info-board">
+              <div className="result-info-column">
+                <span className="result-info-title">规格配置</span>
+                <strong>{rental.card_count} x {rental.card_type}</strong>
+                <span>{rental.cabinet_type}</span>
+                <span>{rental.allocations.length} 台机柜参与分配</span>
+              </div>
+
+              <div className="result-info-column">
+                <span className="result-info-title">计费方式</span>
+                <strong>{formatCurrency(rental.hourly_user_price_total)}/小时</strong>
+                <span>当前电费成本 {formatCurrency(rental.hourly_power_cost_total)}/小时</span>
+                <span>已运行 {formatDuration(rental.duration_seconds)}</span>
+              </div>
+
+              <div className="result-info-column result-info-column-ssh">
+                <span className="result-info-title">SSH 登录信息</span>
+                {!sshReady && rental.status !== "cancelled" ? (
+                  <div className="ssh-loading-card">
+                    <strong>正在准备 SSH 登录信息...</strong>
+                    <p>模拟开机和下发账号中，预计 3 秒内完成。</p>
+                  </div>
+                ) : (
+                  <div className="ssh-plain-block">
+                    <div><span>登录指令</span><strong>ssh root@mock-{rental.rental_id}.compute.local -p 22</strong></div>
+                    <div><span>登录密码</span><strong>{rental.connection?.password ?? "123456"}</strong></div>
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="allocation-list">
@@ -117,6 +158,7 @@ export default function ResultPage() {
                     <p>{item.location} · {item.cabinet_type}</p>
                   </div>
                   <div className="allocation-metrics">
+                    <span>本次分配 {item.allocated_cards} 卡</span>
                     <span>容量 {item.capacity_cards} 卡</span>
                     <span>用户每小时 {formatCurrency(item.hourly_user_price)}</span>
                     <span>电费每小时 {formatCurrency(item.hourly_power_cost)}</span>
@@ -124,18 +166,7 @@ export default function ResultPage() {
                 </article>
               ))}
             </div>
-          </div>
 
-          <div className="panel result-side">
-            <h3>连接信息</h3>
-            <div className="credential-block">
-              <span>IP</span>
-              <strong>{rental.connection?.ip ?? "-"}</strong>
-            </div>
-            <div className="credential-block">
-              <span>Password</span>
-              <strong>{rental.connection?.password ?? "-"}</strong>
-            </div>
             <button className="secondary-link secondary-link-block" onClick={() => navigate("/")}>
               回到封面页
             </button>

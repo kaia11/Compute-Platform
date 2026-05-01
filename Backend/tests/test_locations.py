@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 def test_locations_summary_shape(client):
     response = client.get("/api/locations/summary")
 
@@ -19,9 +18,9 @@ def test_locations_summary_counts_and_status(client):
     items = {item["location"]: item for item in response.json()["items"]}
 
     assert items["位置1"]["total_cabinets"] == 14
-    assert items["位置1"]["available_cabinets"] == 7
+    assert items["位置1"]["available_cabinets"] == 6
     assert items["位置1"]["rented_cabinets"] == 5
-    assert items["位置1"]["offline_cabinets"] == 2
+    assert items["位置1"]["offline_cabinets"] == 3
     assert items["位置1"]["node_status"] == "available"
 
     assert items["位置2"]["node_status"] == "rented"

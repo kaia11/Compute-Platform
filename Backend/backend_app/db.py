@@ -11,6 +11,7 @@ from psycopg.rows import dict_row
 
 from .config import resolve_database_url, resolve_db_path
 from .seed import CARD_PRODUCTS, DEFAULT_HISTORY_RENTALS, DEFAULT_USERS, USER_PRICE_CONFIGS, build_cabinets
+from .utils import cabinet_status_from_active_cards
 
 
 _db_path: Path = resolve_db_path()
@@ -180,7 +181,9 @@ def _schema_statements(backend: str) -> list[str]:
             capacity_cards INTEGER NOT NULL,
             day_hourly_power_cost REAL NOT NULL,
             night_hourly_power_cost REAL NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('available', 'rented', 'offline'))
+            status TEXT NOT NULL CHECK(status IN ('available', 'rented', 'offline')),
+            last_idle_at TEXT,
+            active_card_count INTEGER NOT NULL DEFAULT 0
         )
         """,
         f"""
@@ -229,7 +232,7 @@ def _schema_statements(backend: str) -> list[str]:
             card_type TEXT NOT NULL,
             cabinet_type TEXT NOT NULL,
             cabinet_count INTEGER NOT NULL,
-            timeslot TEXT NOT NULL CHECK(timeslot IN ('day', 'night')),
+            card_count INTEGER,
             started_at TEXT NOT NULL,
             ended_at TEXT,
             duration_seconds INTEGER,
@@ -248,6 +251,7 @@ def _schema_statements(backend: str) -> list[str]:
             id {identity},
             rental_id INTEGER NOT NULL,
             cabinet_id INTEGER NOT NULL,
+            allocated_cards INTEGER NOT NULL DEFAULT 1,
             hourly_user_price REAL NOT NULL,
             hourly_power_cost REAL NOT NULL,
             FOREIGN KEY(rental_id) REFERENCES rentals(id) ON DELETE CASCADE,
@@ -258,29 +262,110 @@ def _schema_statements(backend: str) -> list[str]:
 
 
 def _migrate_schema(conn: ConnectionAdapter) -> None:
+    _drop_column_if_exists(conn, "rentals", "timeslot")
     _ensure_column(conn, "rentals", "user_id", "INTEGER")
+    _ensure_column(conn, "cabinets", "last_idle_at", "TEXT")
+    _ensure_column(conn, "cabinets", "active_card_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "rentals", "card_count", "INTEGER")
+    _ensure_column(conn, "rental_allocations", "allocated_cards", "INTEGER NOT NULL DEFAULT 1")
+    _backfill_cabinet_load_state(conn)
+    _backfill_rental_card_count(conn)
+    conn.execute(
+        "UPDATE rental_allocations SET allocated_cards = 1 WHERE allocated_cards IS NULL OR allocated_cards < 1",
+    )
+
+
+def _backfill_cabinet_load_state(conn: ConnectionAdapter) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, status, capacity_cards, active_card_count
+        FROM cabinets
+        """
+    ).fetchall()
+    for row in rows:
+        current_active = row["active_card_count"]
+        if current_active not in (None, 0):
+            normalized_status = cabinet_status_from_active_cards(int(current_active), int(row["capacity_cards"]))
+            if normalized_status != row["status"]:
+                conn.execute(
+                    "UPDATE cabinets SET status = ? WHERE id = ?",
+                    (normalized_status, row["id"]),
+                )
+            continue
+        seeded_status = row["status"]
+        capacity_cards = int(row["capacity_cards"])
+        if seeded_status == "offline":
+            active_card_count = 0
+        elif seeded_status == "rented":
+            active_card_count = capacity_cards
+        elif capacity_cards == 1:
+            active_card_count = 0
+        else:
+            active_card_count = max(1, capacity_cards // 2)
+        normalized_status = cabinet_status_from_active_cards(active_card_count, capacity_cards)
+        conn.execute(
+            "UPDATE cabinets SET active_card_count = ?, status = ?, last_idle_at = NULL WHERE id = ?",
+            (active_card_count, normalized_status, row["id"]),
+        )
+
+
+def _backfill_rental_card_count(conn: ConnectionAdapter) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, cabinet_type, cabinet_count, card_count
+        FROM rentals
+        """
+    ).fetchall()
+    for row in rows:
+        if row["card_count"]:
+            continue
+        cabinet_type = row["cabinet_type"]
+        capacity = {
+            "单卡机柜": 1,
+            "双卡机柜": 2,
+            "8卡机柜": 8,
+            "16卡机柜": 16,
+        }.get(cabinet_type, 1)
+        card_count = int(row["cabinet_count"]) * capacity
+        conn.execute(
+            "UPDATE rentals SET card_count = ? WHERE id = ?",
+            (card_count, row["id"]),
+        )
 
 
 def _ensure_column(conn: ConnectionAdapter, table_name: str, column_name: str, column_sql: str) -> None:
-    if conn.backend == "sqlite":
-        columns = {
-            row["name"]
-            for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-        }
-    else:
-        rows = conn.execute(
-            """
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = %s
-            """,
-            (table_name,),
-        ).fetchall()
-        columns = {row["column_name"] for row in rows}
+    columns = _get_columns(conn, table_name)
 
     if column_name in columns:
         return
     conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+
+
+def _drop_column_if_exists(conn: ConnectionAdapter, table_name: str, column_name: str) -> None:
+    columns = _get_columns(conn, table_name)
+    if column_name not in columns:
+        return
+    if conn.backend == "sqlite":
+        conn.execute(f"ALTER TABLE {table_name} DROP COLUMN {column_name}")
+        return
+    conn.execute(f"ALTER TABLE {table_name} DROP COLUMN IF EXISTS {column_name}")
+
+
+def _get_columns(conn: ConnectionAdapter, table_name: str) -> set[str]:
+    if conn.backend == "sqlite":
+        return {
+            row["name"]
+            for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+    rows = conn.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s
+        """,
+        (table_name,),
+    ).fetchall()
+    return {row["column_name"] for row in rows}
 
 
 def _seed_if_empty(conn: ConnectionAdapter) -> None:
@@ -319,10 +404,10 @@ def _seed_if_empty(conn: ConnectionAdapter) -> None:
                 """
                 INSERT INTO cabinets (
                     cabinet_code, location, card_type, cabinet_type, capacity_cards,
-                    day_hourly_power_cost, night_hourly_power_cost, status
+                    day_hourly_power_cost, night_hourly_power_cost, status, last_idle_at, active_card_count
                 ) VALUES (
                     :cabinet_code, :location, :card_type, :cabinet_type, :capacity_cards,
-                    :day_hourly_power_cost, :night_hourly_power_cost, :status
+                    :day_hourly_power_cost, :night_hourly_power_cost, :status, NULL, :active_card_count
                 )
                 """,
                 records,
@@ -402,7 +487,7 @@ def _seed_history_rentals(conn: ConnectionAdapter) -> None:
             card_type,
             cabinet_type,
             cabinet_count,
-            timeslot,
+            card_count,
             started_at,
             ended_at,
             duration_seconds,
@@ -418,7 +503,7 @@ def _seed_history_rentals(conn: ConnectionAdapter) -> None:
             :card_type,
             :cabinet_type,
             :cabinet_count,
-            :timeslot,
+            :card_count,
             :started_at,
             :ended_at,
             :duration_seconds,

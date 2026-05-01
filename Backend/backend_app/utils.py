@@ -5,8 +5,12 @@ from datetime import datetime
 from .config import TIMEZONE
 
 
+def now_dt() -> datetime:
+    return datetime.now(TIMEZONE)
+
+
 def now_iso() -> str:
-    return datetime.now(TIMEZONE).isoformat(timespec="seconds")
+    return now_dt().isoformat(timespec="seconds")
 
 
 def parse_iso(value: str | None) -> datetime | None:
@@ -29,6 +33,19 @@ def duration_hours_from_seconds(duration_seconds: int | None) -> float:
     if not duration_seconds:
         return 0.0
     return round2(duration_seconds / 3600) or 0.0
+
+
+def resolve_timeslot(dt: datetime | None = None) -> str:
+    current = dt.astimezone(TIMEZONE) if dt else now_dt()
+    return "day" if 9 <= current.hour < 17 else "night"
+
+
+def cabinet_status_from_active_cards(active_card_count: int, capacity_cards: int) -> str:
+    if active_card_count <= 0:
+        return "offline"
+    if active_card_count >= capacity_cards:
+        return "rented"
+    return "available"
 
 
 def card_label(card_type: str, cabinet_type: str) -> str:

@@ -6,8 +6,7 @@ from pydantic import BaseModel, Field
 class CreateRentalRequest(BaseModel):
     card_type: str
     cabinet_type: str
-    cabinet_count: int = Field(ge=1)
-    timeslot: str
+    card_count: int = Field(ge=1)
 
 
 class RegisterRequest(BaseModel):

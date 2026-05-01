@@ -1,6 +1,21 @@
 from __future__ import annotations
 
-from backend_app.db import connection_scope
+from datetime import datetime
+
+from backend_app.db import connection_scope, transaction
+from backend_app.config import TIMEZONE
+
+
+def patch_now(monkeypatch, *datetimes: datetime) -> None:
+    values = list(datetimes)
+    last_value = values[-1]
+
+    def fake_now():
+        if values:
+            return values.pop(0)
+        return last_value
+
+    monkeypatch.setattr("backend_app.utils.now_dt", fake_now)
 
 
 def login_headers(client) -> dict:
@@ -20,8 +35,7 @@ def create_sample_rental(client, headers: dict) -> dict:
         json={
             "card_type": "4090",
             "cabinet_type": "单卡机柜",
-            "cabinet_count": 2,
-            "timeslot": "night",
+            "card_count": 2,
         },
     )
     assert response.status_code == 200
@@ -30,14 +44,14 @@ def create_sample_rental(client, headers: dict) -> dict:
     return data
 
 
-def test_create_rental_requires_login(client):
+def test_create_rental_requires_login(client, monkeypatch):
+    patch_now(monkeypatch, datetime(2026, 4, 30, 20, 0, tzinfo=TIMEZONE))
     response = client.post(
         "/api/rentals",
         json={
             "card_type": "4090",
             "cabinet_type": "单卡机柜",
-            "cabinet_count": 1,
-            "timeslot": "night",
+            "card_count": 1,
         },
     )
 
@@ -47,11 +61,13 @@ def test_create_rental_requires_login(client):
     assert data["error"]["code"] == "UNAUTHORIZED"
 
 
-def test_create_rental_success(client):
+def test_create_rental_success(client, monkeypatch):
+    patch_now(monkeypatch, datetime(2026, 4, 30, 20, 0, tzinfo=TIMEZONE))
     headers = login_headers(client)
     data = create_sample_rental(client, headers)
 
     assert data["status"] == "active"
+    assert data["card_count"] == 2
     assert data["hourly_user_price_total"] == 24.0
     assert data["hourly_power_cost_total"] == 8.4
     assert len(data["allocations"]) == 2
@@ -69,7 +85,8 @@ def test_create_rental_success(client):
     assert rented_count >= 2
 
 
-def test_get_rental_detail(client):
+def test_get_rental_detail(client, monkeypatch):
+    patch_now(monkeypatch, datetime(2026, 4, 30, 20, 0, tzinfo=TIMEZONE))
     headers = login_headers(client)
     created = create_sample_rental(client, headers)
     rental_id = created["rental_id"]
@@ -83,7 +100,8 @@ def test_get_rental_detail(client):
     assert len(data["allocations"]) == 2
 
 
-def test_create_rental_no_available_cabinets_returns_unified_error(client):
+def test_create_rental_no_available_cabinets_returns_unified_error(client, monkeypatch):
+    patch_now(monkeypatch, datetime(2026, 4, 30, 10, 0, tzinfo=TIMEZONE))
     headers = login_headers(client)
     response = client.post(
         "/api/rentals",
@@ -91,15 +109,14 @@ def test_create_rental_no_available_cabinets_returns_unified_error(client):
         json={
             "card_type": "910C",
             "cabinet_type": "16卡机柜",
-            "cabinet_count": 3,
-            "timeslot": "day",
+            "card_count": 200,
         },
     )
 
     assert response.status_code == 409
     data = response.json()
     assert data["success"] is False
-    assert data["error"]["code"] == "NO_AVAILABLE_CABINETS"
+    assert data["error"]["code"] == "NO_AVAILABLE_CARDS"
 
 
 def test_get_missing_rental_returns_unified_404(client):
@@ -112,7 +129,12 @@ def test_get_missing_rental_returns_unified_404(client):
     assert data["error"]["code"] == "RENTAL_NOT_FOUND"
 
 
-def test_cancel_rental_releases_cabinets_and_computes_totals(client):
+def test_cancel_rental_releases_cabinets_and_computes_totals(client, monkeypatch):
+    patch_now(
+        monkeypatch,
+        datetime(2026, 4, 30, 20, 0, tzinfo=TIMEZONE),
+        datetime(2026, 4, 30, 20, 30, tzinfo=TIMEZONE),
+    )
     headers = login_headers(client)
     created = create_sample_rental(client, headers)
     rental_id = created["rental_id"]
@@ -133,10 +155,16 @@ def test_cancel_rental_releases_cabinets_and_computes_totals(client):
             f"SELECT cabinet_code, status FROM cabinets WHERE cabinet_code IN ({placeholders}) ORDER BY cabinet_code",
             codes,
         ).fetchall()
-    assert [row["status"] for row in rows] == ["available", "available"]
+    assert [row["status"] for row in rows] == ["offline", "offline"]
 
 
-def test_cancel_rental_is_idempotent(client):
+def test_cancel_rental_is_idempotent(client, monkeypatch):
+    patch_now(
+        monkeypatch,
+        datetime(2026, 4, 30, 20, 0, tzinfo=TIMEZONE),
+        datetime(2026, 4, 30, 20, 30, tzinfo=TIMEZONE),
+        datetime(2026, 4, 30, 20, 31, tzinfo=TIMEZONE),
+    )
     headers = login_headers(client)
     created = create_sample_rental(client, headers)
     rental_id = created["rental_id"]
@@ -150,6 +178,76 @@ def test_cancel_rental_is_idempotent(client):
     assert second.json()["status"] == "cancelled"
 
 
+def test_create_rental_can_wake_cheaper_offline_cabinet(client, monkeypatch):
+    patch_now(monkeypatch, datetime(2026, 4, 30, 20, 0, tzinfo=TIMEZONE))
+    headers = login_headers(client)
+
+    with transaction() as conn:
+        conn.execute(
+            """
+            UPDATE cabinets
+            SET status = 'available', active_card_count = 1, last_idle_at = NULL
+            WHERE cabinet_code = ?
+            """,
+            ("P3-4090-D-001",),
+        )
+        conn.execute(
+            """
+            UPDATE cabinets
+            SET status = 'offline', active_card_count = 0, last_idle_at = NULL, night_hourly_power_cost = ?
+            WHERE cabinet_code = ?
+            """,
+            (8.0, "P3-4090-D-003"),
+        )
+
+    response = client.post(
+        "/api/rentals",
+        headers=headers,
+        json={
+            "card_type": "4090",
+            "cabinet_type": "双卡机柜",
+            "card_count": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [item["cabinet_code"] for item in data["allocations"]] == ["P3-4090-D-003"]
+    assert data["hourly_power_cost_total"] == 4.0
+
+    with connection_scope() as conn:
+        status = conn.execute(
+            "SELECT status, active_card_count FROM cabinets WHERE cabinet_code = ?",
+            ("P3-4090-D-003",),
+        ).fetchone()
+    assert status["status"] == "available"
+    assert status["active_card_count"] == 1
+
+
+def test_cancel_rental_powers_off_cabinet_when_no_cards_remain(client, monkeypatch):
+    patch_now(
+        monkeypatch,
+        datetime(2026, 4, 30, 20, 0, tzinfo=TIMEZONE),
+        datetime(2026, 4, 30, 20, 30, tzinfo=TIMEZONE),
+    )
+    headers = login_headers(client)
+    created = create_sample_rental(client, headers)
+    rental_id = created["rental_id"]
+    codes = [item["cabinet_code"] for item in created["allocations"]]
+
+    response = client.post(f"/api/rentals/{rental_id}/cancel", headers=headers)
+
+    assert response.status_code == 200
+    placeholders = ",".join("?" for _ in codes)
+    with connection_scope() as conn:
+        rows = conn.execute(
+            f"SELECT cabinet_code, status, active_card_count FROM cabinets WHERE cabinet_code IN ({placeholders}) ORDER BY cabinet_code",
+            codes,
+        ).fetchall()
+    assert [row["status"] for row in rows] == ["offline", "offline"]
+    assert all(row["active_card_count"] == 0 for row in rows)
+
+
 def test_validation_error_uses_unified_shape(client):
     headers = login_headers(client)
     response = client.post(
@@ -158,8 +256,7 @@ def test_validation_error_uses_unified_shape(client):
         json={
             "card_type": "4090",
             "cabinet_type": "单卡机柜",
-            "cabinet_count": 0,
-            "timeslot": "night",
+            "card_count": 0,
         },
     )
 

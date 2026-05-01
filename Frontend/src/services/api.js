@@ -1,4 +1,8 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+const RUNTIME_TARGET = import.meta.env.VITE_RUNTIME_TARGET ?? (import.meta.env.DEV ? "local" : "remote");
+const API_BASE_URL =
+  RUNTIME_TARGET === "local"
+    ? ""
+    : (import.meta.env.VITE_REMOTE_API_BASE_URL ?? import.meta.env.VITE_API_BASE_URL ?? "");
 const TOKEN_KEY = "compute_rental_access_token";
 
 let accessToken = "";

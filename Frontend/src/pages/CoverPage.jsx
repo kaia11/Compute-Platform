@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import HeaderUserSection from "../components/layout/HeaderUserSection";
 import PageShell from "../components/layout/PageShell";
 import NetworkGraph from "../components/cover/NetworkGraph";
 import { useAuth } from "../context/AuthContext";
-import { API_BASE_URL, getLocationsSummary } from "../services/api";
+import { getLocationsSummary } from "../services/api";
 
 export default function CoverPage() {
   const navigate = useNavigate();
@@ -54,7 +54,7 @@ export default function CoverPage() {
         </div>
       </header>
 
-      <section className="cover-content">
+      <section className="cover-content cover-content-full">
         <div className="panel panel-network">
           <div className="panel-head">
             <div>
@@ -71,17 +71,6 @@ export default function CoverPage() {
           {loading ? <div className="empty-state">正在加载位置数据...</div> : null}
           {error ? <div className="error-banner">{error}</div> : null}
           {!loading && !error ? <NetworkGraph summary={summary} /> : null}
-        </div>
-
-        <div className="panel panel-side">
-          <h3>接口来源</h3>
-          <p>封面页节点与 hover 明细统一来自后端位置聚合接口，前端不做本地拼装。</p>
-          <code>{API_BASE_URL}/api/locations/summary</code>
-          <div className="side-links">
-            <Link className="secondary-link" to={isAuthenticated ? "/catalog" : "/auth"}>
-              进入卡型选择页
-            </Link>
-          </div>
         </div>
       </section>
     </PageShell>

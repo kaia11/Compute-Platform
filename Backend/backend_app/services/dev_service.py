@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from ..db import transaction
 from ..errors import AppError
-
-
 def release_cabinets(
     card_type: str | None = None,
     cabinet_type: str | None = None,
@@ -45,7 +43,7 @@ def release_cabinets(
 
         released_ids = [cabinet["id"] for cabinet in cabinets]
         conn.execute(
-            f"UPDATE cabinets SET status = 'available' WHERE id IN ({','.join('?' for _ in released_ids)})",
+            f"UPDATE cabinets SET active_card_count = 0, status = 'offline', last_idle_at = NULL WHERE id IN ({','.join('?' for _ in released_ids)})",
             released_ids,
         )
 
@@ -59,7 +57,7 @@ def release_cabinets(
                     "card_type": cabinet["card_type"],
                     "cabinet_type": cabinet["cabinet_type"],
                     "previous_status": cabinet["status"],
-                    "current_status": "available",
+                    "current_status": "offline",
                 }
                 for cabinet in cabinets
             ],

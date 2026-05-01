@@ -1,11 +1,14 @@
-export function getNodeRadius(totalCabinets) {
-  if (totalCabinets >= 15) {
-    return 18;
+export function getNodeRadius(totalCabinets, minCabinets, maxCabinets) {
+  const minRadius = 16;
+  const maxRadius = 30;
+  const total = Number(totalCabinets) || 0;
+
+  if (maxCabinets <= minCabinets) {
+    return 22;
   }
-  if (totalCabinets >= 13) {
-    return 15;
-  }
-  return 12;
+
+  const ratio = (total - minCabinets) / (maxCabinets - minCabinets);
+  return Math.round(minRadius + Math.sqrt(Math.max(0, ratio)) * (maxRadius - minRadius));
 }
 
 export function getNodeClass(status) {

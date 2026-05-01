@@ -25,7 +25,7 @@ CARD_PRODUCTS = [
         "vram": "24G",
         "cpu": "16核",
         "memory": "64G",
-        "display_price": "4.2元/小时起",
+        "display_price": "单卡 12.0元/小时起",
     },
     {
         "card_type": "910B",
@@ -34,7 +34,7 @@ CARD_PRODUCTS = [
         "vram": "32G",
         "cpu": "64核",
         "memory": "256G",
-        "display_price": "21.6元/小时起",
+        "display_price": "1卡 6.0元/小时起",
     },
     {
         "card_type": "910C",
@@ -43,7 +43,7 @@ CARD_PRODUCTS = [
         "vram": "64G",
         "cpu": "128核",
         "memory": "512G",
-        "display_price": "24.9元/小时起",
+        "display_price": "1卡 4.0元/小时起",
     },
 ]
 
@@ -71,7 +71,7 @@ DEFAULT_HISTORY_RENTALS = [
         "card_type": "910C",
         "cabinet_type": "16卡机柜",
         "cabinet_count": 1,
-        "timeslot": "day",
+        "card_count": 16,
         "started_at": "2026-04-20T10:00:00+08:00",
         "ended_at": "2026-04-20T12:00:00+08:00",
         "duration_seconds": 7200,
@@ -87,7 +87,7 @@ DEFAULT_HISTORY_RENTALS = [
         "card_type": "4090",
         "cabinet_type": "双卡机柜",
         "cabinet_count": 1,
-        "timeslot": "night",
+        "card_count": 2,
         "started_at": "2026-04-18T09:00:00+08:00",
         "ended_at": "2026-04-18T15:00:00+08:00",
         "duration_seconds": 21600,
@@ -200,6 +200,52 @@ CABINET_STATUS_MAP = {
     "P4-910C-005": "offline",
 }
 
+PRICE_RULES = {
+    ("4090", "单卡机柜"): {"single_total": 12.0, "bulk_per_card": 12.0, "preview_max": 4},
+    ("4090", "双卡机柜"): {"single_total": 12.0, "bulk_per_card": 11.0, "preview_max": 4},
+    ("910B", "8卡机柜"): {"single_total": 6.0, "bulk_per_card": 5.9, "preview_max": 8},
+    ("910C", "16卡机柜"): {"single_total": 4.0, "bulk_per_card": 3.9, "preview_max": 16},
+}
+
+
+def get_hourly_user_price_total(card_type: str, cabinet_type: str, card_count: int) -> float:
+    rule = PRICE_RULES.get((card_type, cabinet_type))
+    if not rule or card_count < 1:
+        raise ValueError(f"price tier not configured for {card_type} {cabinet_type} x {card_count}")
+    if card_count == 1:
+        return float(rule["single_total"])
+    return round(float(rule["bulk_per_card"]) * card_count, 2)
+
+
+def get_pricing_preview(card_type: str, cabinet_type: str) -> list[dict]:
+    preview_max = int(PRICE_RULES[(card_type, cabinet_type)]["preview_max"])
+    return [
+        {
+            "card_count": count,
+            "hourly_user_price_total": get_hourly_user_price_total(card_type, cabinet_type, count),
+            "avg_per_card": round(get_hourly_user_price_total(card_type, cabinet_type, count) / count, 2),
+        }
+        for count in range(1, preview_max + 1)
+    ]
+
+
+def derive_active_card_count(capacity_cards: int, seeded_status: str) -> int:
+    if seeded_status == "offline":
+        return 0
+    if seeded_status == "rented":
+        return capacity_cards
+    if capacity_cards == 1:
+        return 0
+    return max(1, capacity_cards // 2)
+
+
+def derive_cabinet_status(active_card_count: int, capacity_cards: int) -> str:
+    if active_card_count <= 0:
+        return "offline"
+    if active_card_count >= capacity_cards:
+        return "rented"
+    return "available"
+
 
 def build_cabinets() -> list[dict]:
     grouped: dict[str, list[dict]] = {template.location: [] for template in TEMPLATES}
@@ -222,6 +268,13 @@ def build_cabinets() -> list[dict]:
     for location, items in grouped.items():
         items.sort(key=lambda item: item["cabinet_code"])
         for item in items:
-            status = CABINET_STATUS_MAP.get(item["cabinet_code"], DEFAULT_CABINET_STATUS)
-            cabinets.append({**item, "status": status})
+            seeded_status = CABINET_STATUS_MAP.get(item["cabinet_code"], DEFAULT_CABINET_STATUS)
+            active_card_count = derive_active_card_count(item["capacity_cards"], seeded_status)
+            cabinets.append(
+                {
+                    **item,
+                    "active_card_count": active_card_count,
+                    "status": derive_cabinet_status(active_card_count, item["capacity_cards"]),
+                }
+            )
     return cabinets

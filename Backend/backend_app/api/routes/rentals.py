@@ -16,8 +16,7 @@ def create_rental_route(payload: CreateRentalRequest, user: dict = Depends(get_c
         user_id=user["id"],
         card_type=payload.card_type,
         cabinet_type=payload.cabinet_type,
-        cabinet_count=payload.cabinet_count,
-        timeslot=payload.timeslot,
+        card_count=payload.card_count,
     )
 
 

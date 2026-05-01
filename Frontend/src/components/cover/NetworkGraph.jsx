@@ -10,11 +10,14 @@ export default function NetworkGraph({ summary }) {
     }
     const width = 1200;
     const height = 520;
+    const totals = summary.items.map((item) => Number(item.total_cabinets) || 0);
+    const minCabinets = Math.min(...totals);
+    const maxCabinets = Math.max(...totals);
     const nodes = summary.items.map((item) => ({
       ...item,
       x: item.x_ratio * width,
       y: item.y_ratio * height,
-      radius: getNodeRadius(item.total_cabinets)
+      radius: getNodeRadius(item.total_cabinets, minCabinets, maxCabinets)
     }));
     const nodeMap = new Map(nodes.map((item) => [item.location, item]));
     const edges = (summary.edges ?? [])
@@ -56,7 +59,7 @@ export default function NetworkGraph({ summary }) {
             <circle
               cx={node.x}
               cy={node.y}
-              r={node.radius + 8}
+              r={node.radius + 12}
               className={`node-glow ${getNodeClass(node.node_status)}`}
             />
             <circle
@@ -65,7 +68,7 @@ export default function NetworkGraph({ summary }) {
               r={node.radius}
               className={`node-core ${getNodeClass(node.node_status)}`}
             />
-            <text x={node.x} y={node.y + node.radius + 24} textAnchor="middle" className="node-label">
+            <text x={node.x} y={node.y + node.radius + 28} textAnchor="middle" className="node-label">
               {node.location}
             </text>
           </g>
